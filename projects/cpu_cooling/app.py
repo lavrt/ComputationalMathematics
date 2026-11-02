@@ -9,7 +9,7 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from calculation import DEFAULTS, FACE_NAMES, validate, solve
-from graphics import draw_isotherms, draw_slices
+from graphics import BACKGROUND, CMAP, setup_axis, draw_isotherms, draw_slices
 
 
 class Application:
@@ -18,6 +18,19 @@ class Application:
         root.title('Охлаждение процессора')
         root.geometry('1250x850')
         root.minsize(1000,720)
+        root.configure(bg=BACKGROUND)
+        style=ttk.Style(root)
+        style.theme_use('clam')
+        style.configure('.', font=('Segoe UI', 10), background=BACKGROUND, foreground='#334155')
+        style.configure('TFrame', background=BACKGROUND)
+        style.configure('TLabel', background=BACKGROUND)
+        style.configure('TNotebook', background=BACKGROUND, borderwidth=0)
+        style.configure('TNotebook.Tab', padding=(18, 10))
+        style.map('TNotebook.Tab', background=[('selected', '#ffffff')],
+                  foreground=[('selected', '#0891b2')])
+        style.configure('TButton', padding=(12, 10), background='#0891b2', foreground='white')
+        style.map('TButton', background=[('active', '#0e7490'), ('disabled', '#cbd5e1')])
+        style.configure('TEntry', padding=5, fieldbackground='white')
         self.data=None
         self.busy=False
         self.closed=False
@@ -59,12 +72,14 @@ class Application:
         self.tabs.grid(row=0,column=0,sticky='nsew')
         self.figures=[]
         self.canvases=[]
+        self.plot_axes=[None, None]
+        self.slice_artists=[]
         for title in ['Изотермические поверхности','Температурные сечения']:
             tab=ttk.Frame(self.tabs)
             self.tabs.add(tab,text=title)
-            fig=Figure(figsize=(8,6),dpi=100,facecolor='white')
+            fig=Figure(figsize=(8,6),dpi=100,facecolor=BACKGROUND)
             ax=fig.add_subplot(projection='3d')
-            ax.set(xlabel='x, см',ylabel='y, см',zlabel='z, см')
+            ax.set_axis_off()
             canvas=FigureCanvasTkAgg(fig,master=tab)
             canvas.get_tk_widget().pack(fill='both',expand=True)
             canvas.mpl_connect('scroll_event',lambda event,c=canvas:self.zoom(event,c))
@@ -77,7 +92,10 @@ class Application:
             label=ttk.Label(self.slider_frame,text='xyz'[axis])
             label.grid(row=axis,column=0,sticky='w',padx=(0,12))
             scale=tk.Scale(self.slider_frame,from_=0,to=15,orient='horizontal',showvalue=False,
-                           state='disabled',command=lambda value:self.schedule_slices())
+                           state='disabled',resolution=.02, bd=0, highlightthickness=0,
+                           bg=BACKGROUND, troughcolor='#e2e8f0', activebackground='#0891b2',
+                           sliderrelief='flat', sliderlength=22, width=8,
+                           command=lambda value:self.schedule_slices())
             scale.grid(row=axis,column=1,sticky='ew')
             self.scales.append(scale)
             self.labels.append(label)
@@ -111,7 +129,7 @@ class Application:
         self.busy=True
         self.submit.configure(text='Расчёт…',state='disabled')
         for widget in [*self.entries.values(),*self.buttons.values()]:widget.configure(state='disabled')
-        # Рабочий поток не обращается к Tk и Matplotlib.
+
         def worker():
             try:self.messages.put(('done',solve(p,faces)))
             except Exception as exc:self.messages.put(('error',str(exc)))
@@ -134,6 +152,8 @@ class Application:
                     scale.configure(to=value['p']['N']-1,state='normal')
                     scale.set(value['p']['N']//2)
                 self.setting_sliders=False
+                self.plot_axes=[None, None]
+                self.slice_artists=[]
                 self.render(0)
                 self.render(1)
                 self.root.title(f"Охлаждение процессора — Tmax контакта {value['tmax']:.2f} °C")
@@ -149,27 +169,43 @@ class Application:
     def render(self,index):
         if self.closed or self.data is None:return
         fig=self.figures[index]
-        old=next((a for a in fig.axes if a.name=='3d'),None)
-        elev,azim=(old.elev,old.azim) if old else (25,-60)
-        fig.clear()
-        ax=fig.add_subplot(projection='3d')
-        ax.view_init(elev=elev,azim=azim)
-        if index==0:norm=draw_isotherms(ax,self.data)
-        else:
-            indices=[int(s.get()) for s in self.scales]
-            norm=draw_slices(ax,self.data,indices)
+        ax=self.plot_axes[index]
+        indices=[float(s.get()) for s in self.scales]
+        if ax is None:
+            # При новом расчёте сохраняем камеру, но возвращаем границы нового куба.
+            old=next((a for a in fig.axes if a.name=='3d'),None)
+            elev,azim=(old.elev,old.azim) if old else (25,-55)
+            fig.clear()
+            ax=fig.add_subplot(projection='3d')
+            ax.view_init(elev=elev,azim=azim)
+            self.plot_axes[index]=ax
+            if index==0:
+                norm=draw_isotherms(ax,self.data)
+            else:
+                setup_axis(ax,self.data)
+                norm,self.slice_artists=draw_slices(ax,self.data,indices)
+            bar=fig.colorbar(ScalarMappable(norm=norm,cmap=CMAP),ax=ax,
+                            shrink=.62,pad=.065,fraction=.035,aspect=28)
+            bar.set_label('Температура, °C',color='#334155',fontsize=10,labelpad=12)
+            bar.outline.set_visible(False)
+            bar.ax.tick_params(colors='#64748b',labelsize=9,width=0)
+            fig.subplots_adjust(left=.01,right=.90,bottom=.04,top=.99)
+        elif index==1:
+            # Сохраняем оси, шкалу, поворот и масштаб; заменяем только три плоскости.
+            limits=(ax.get_xlim3d(),ax.get_ylim3d(),ax.get_zlim3d())
+            for artist in self.slice_artists:artist.remove()
+            _,self.slice_artists=draw_slices(ax,self.data,indices)
+            ax.set_xlim3d(limits[0]); ax.set_ylim3d(limits[1]); ax.set_zlim3d(limits[2])
+        if index==1:
             for axis,i in enumerate(indices):
                 cm=(i+.5)*self.data['h']*100
                 self.labels[axis].configure(text=f"{'xyz'[axis]} = {cm:.2f} см")
-        fig.colorbar(ScalarMappable(norm=norm,cmap='inferno'),ax=ax,shrink=.65,pad=.09,label='T, °C')
-        fig.subplots_adjust(left=0,right=.94,bottom=.08,top=.98)
         self.canvases[index].draw_idle()
 
     def schedule_slices(self):
         if self.setting_sliders or self.data is None or self.closed:return
-        if self.pending is not None:self.root.after_cancel(self.pending)
-        # Перерисовываем только сечения, не извлекая изоповерхности повторно.
-        self.pending=self.root.after(150,self.redraw_slices)
+        if self.pending is None:
+            self.pending=self.root.after(45,self.redraw_slices)
 
     def redraw_slices(self):
         self.pending=None
