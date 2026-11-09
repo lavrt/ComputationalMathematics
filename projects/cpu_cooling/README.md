@@ -1,8 +1,10 @@
 # CPU cooling
 
 Launch:
-    python -m pip install -r requirements.txt
-    python app.py
+```bash
+python -m pip install -r requirements.txt
+python app.py
+```
 
 Requirements: Python 3.10+, tkinter
 
